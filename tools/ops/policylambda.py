@@ -116,7 +116,70 @@ def setup_parser():
     parser.add_argument("-p", "--policies", default=None, dest='policy_filter',
                         help="Only use named/matched policies")
     parser.add_argument("-o", "--output-dir", default=None, required=True)
+    parser.add_argument("--max-stack-resources", type=int, default=50, required=False)
     return parser
+
+
+def create_nested_stack(resources, path):
+    sam = {
+        'AWSTemplateFormatVersion': '2010-09-09',
+        'Transform': 'AWS::Serverless-2016-10-31',
+        'Resources': resources,
+    }
+
+    with open(path, 'w') as fh:
+        fh.write(yaml.safe_dump(sam, default_flow_style=False))
+
+    return sam
+
+
+# split a dictionary into a list of dictionaries
+# with no more elements than n
+def split_into_batches(l, n):
+    counter = 1
+    last_dictionary = {}
+    result = [
+        last_dictionary,
+    ]
+
+    for k, v in l.items():
+        if counter > n:
+            last_dictionary = {}
+            result.append(last_dictionary)
+
+            counter=0
+
+        last_dictionary[k] = v
+        counter=counter+1
+
+    return result
+
+
+def split_into_nested_stacks(all_resources, max_stack_resources, output_dir):
+    master_resources = {}
+
+    split_resources = split_into_batches(all_resources, max_stack_resources)
+
+    for counter, stack in enumerate(split_resources, start=1):
+        nested_stack_file = f'deploy-{counter}.yml'
+        nested_stack_path = os.path.join(output_dir, nested_stack_file)
+        nested_stack_name = f'NestedStack{counter}'
+
+        create_nested_stack(
+            resources=stack,
+            path=nested_stack_path,
+        )
+
+        nested_stack = {
+            'Type': 'AWS::CloudFormation::Stack',
+            'Properties': {
+                'TemplateURL': nested_stack_file,
+            },
+        }
+
+        master_resources[nested_stack_name] = nested_stack
+
+    return master_resources
 
 
 def main():
@@ -130,8 +193,10 @@ def main():
 
     sam = {
         'AWSTemplateFormatVersion': '2010-09-09',
-        'Transform': 'AWS::Serverless-2016-10-31',
         'Resources': {}}
+
+    # Dict for collecting resources
+    policy_resources = {}
 
     for p in collection:
         if p.provider_name != 'aws':
@@ -142,7 +207,7 @@ def main():
 
         sam_func = render(p)
         if sam_func:
-            sam['Resources'][resource_name(p.name)] = sam_func
+            policy_resources[resource_name(p.name)] = sam_func
             sam_func['Properties']['CodeUri'] = './%s.zip' % p.name
         else:
             print("unable to render sam for policy:%s" % p.name)
@@ -151,6 +216,16 @@ def main():
         archive = mu.PolicyLambda(p).get_archive()
         with open(os.path.join(options.output_dir, "%s.zip" % p.name), 'wb') as fh:
             fh.write(archive.get_bytes())
+
+    if len(policy_resources) < options.max_stack_resources:
+        sam['Transform'] = 'AWS::Serverless-2016-10-31'
+        sam['Resources'] = policy_resources
+    else:
+        sam['Resources'] = split_into_nested_stacks(
+            all_resources=policy_resources,
+            max_stack_resources=options.max_stack_resources,
+            output_dir=options.output_dir,
+        )
 
     with open(os.path.join(options.output_dir, 'deploy.yml'), 'w') as fh:
         fh.write(yaml.safe_dump(sam, default_flow_style=False))
