@@ -105,6 +105,11 @@ def render(p, role_account_id_pattern):
                 'Fn::Sub': role,
             }
 
+    try:
+        del properties['VpcConfig']
+    except KeyError:
+        pass
+
     return {
         'Type': 'AWS::Serverless::Function',
         'Properties': properties}
