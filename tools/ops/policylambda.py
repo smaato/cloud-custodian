@@ -37,6 +37,7 @@ import argparse
 import json
 import os
 import string
+import re
 import yaml
 
 from c7n.config import Config
@@ -44,7 +45,7 @@ from c7n.policy import load as policy_load
 from c7n import mu, resources
 
 
-def render(p):
+def render(p, role_account_id_pattern):
     policy_lambda = mu.PolicyLambda(p)
     properties = policy_lambda.get_config()
 
@@ -89,6 +90,21 @@ def render(p):
             }
 
     properties['Events'] = revents
+
+    try:
+        role = properties['Role']
+    except KeyError:
+        pass
+    else:
+        if role_account_id_pattern.search(role):
+            role = role_account_id_pattern.sub(
+                string=role,
+                repl=r'arn:\1:iam::${AWS::AccountId}:role/\2',
+            )
+            properties['Role'] = {
+                'Fn::Sub': role,
+            }
+
     return {
         'Type': 'AWS::Serverless::Function',
         'Properties': properties}
@@ -191,6 +207,8 @@ def main():
     collection = policy_load(
         config, options.config_file).filter(options.policy_filter)
 
+    role_account_id_pattern = re.compile('^arn:([^:]+):iam::\{account_id\}:role/(.*)$')
+
     sam = {
         'AWSTemplateFormatVersion': '2010-09-09',
         'Resources': {}}
@@ -205,7 +223,7 @@ def main():
         if exec_mode_type == 'pull':
             continue
 
-        sam_func = render(p)
+        sam_func = render(p, role_account_id_pattern)
         if sam_func:
             policy_resources[resource_name(p.name)] = sam_func
             sam_func['Properties']['CodeUri'] = './%s.zip' % p.name
